@@ -84,3 +84,25 @@ actionlint 退出 **1（FAIL）**：go.yml 第 19、47、66、90 行各有两个
 ### 保留限制与停止条件
 
 Legacy 旧 fixture 兼容性未解决；Cancnun 仍为 NOT_VISITED / EXISTING_FIXTURE_KEY。最终源码组合的官方无-short全库、完整 keeper/平台覆盖和远端定向 CI 结果仍需独立确认。actionlint 的既有标签诊断仍保留；没有手动触发重型验证，没有重复 Go 测试、建立源码副本或打包。推送和远端 SHA/CI 快照在完成后单独汇报，不把 queued/running 写成 PASS。
+
+## 2026-10-11：actionlint 配置收尾与定向 CI 结果更新
+
+本轮起点为已评审的 `35bdaf21252506a0b4fa661d60bab6836f206c2d`。只新增 `.github/actionlint.yaml` 和追加本记录，精确声明 self-hosted-ghr、size-s-x64、size-l-x64 三个 runner 标签；没有通配符、ignore 或实际 runs-on 修改。原 actionlint 退出 1 的记录保留，以下是修正后的独立结果。
+
+在主工作区使用既有 actionlint 1.7.7，只执行一次：
+
+```text
+D:/Geth-newfunc-debug/geth-simulate-v1-planning/tools/actionlint-1.7.7/actionlint.exe -config-file .github/actionlint.yaml -shellcheck= -pyflakes= .github/workflows/go.yml .github/workflows/validate_pr.yml .github/workflows/simulate-v1.yml
+```
+
+真实退出码 **0（PASS）**，无诊断输出。shellcheck、pyflakes 仍为 **NOT_RUN**，不计通过。本轮 `git diff --check` 退出 0；仅检查并提交上述两个文本文件，包含删除内容的待提交/待推送 diff 未发现可疑敏感信息或二进制、原始日志、大型 fixture。logtracer.go 原有状态标记保留，实际 Git 内容 diff 为空，未纳入提交。
+
+只读核实 [CI run 38108374624](https://github.com/afhuuuu/go-ethereum/actions/runs/38108374624) 对应提交 `35bdaf21252506a0b4fa661d60bab6836f206c2d`，状态 completed / success：
+
+- simulate-targeted-linux、simulate-targeted-windows 均 success；测试名称检查、模拟回归、原生 tracer 回归及 geth 构建步骤均 success。
+- Linux Trace lifecycle and isolation race 步骤 success。
+- simulate-quality-linux、simulate-full-linux、simulate-keeper-linux、simulate-386-linux 四个重型 job 均 skipped，不计通过。
+
+本轮没有运行 Go、重跑 CI 或手动触发完整矩阵。actionlint 配置和 Markdown 不匹配现有模拟 workflow 的 push 路径过滤；若新提交没有 CI run，Go 验证复用的是上述原提交结果，不能记为新提交的重新执行结果。
+
+Legacy 旧 fixture 兼容问题、Cancnun 的 NOT_VISITED / EXISTING_FIXTURE_KEY、最终源码组合的官方无-short全库及完整 keeper/平台覆盖限制继续保留。已通过的是指定定向 CI 和本轮 actionlint，不是全部验证通过。本轮推送后核对远端 SHA 并停止，不改写旧报告或已发布历史。
