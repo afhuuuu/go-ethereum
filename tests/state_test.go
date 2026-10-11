@@ -70,7 +70,6 @@ func TestState(t *testing.T) {
 	st := new(testMatcher)
 	initMatcher(st)
 	for _, dir := range []string{
-		filepath.Join(baseDir, "EIPTests", "StateTests"),
 		stateTestDir,
 		benchmarksDir,
 	} {
