@@ -6,6 +6,7 @@ on:
 
 jobs:
   validate-pr:
+    if: github.repository == 'ethereum/go-ethereum'
     runs-on: ubuntu-latest
     steps:
       - name: Check for Spam PR

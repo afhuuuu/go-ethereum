@@ -1,0 +1,330 @@
+name: Simulate V1 fork checks
+
+on:
+  push:
+    branches: [feat/simulate-v1-tracing, master]
+    paths:
+      - '**/*.go'
+      - '**/go.mod'
+      - '**/go.sum'
+      - build/**
+      - Makefile
+      - .golangci.yml
+      - .github/workflows/**
+      - tests/testdata/**
+      - tests/spec-tests/**
+      - '!**/*.md'
+  pull_request:
+    branches: [master, feat/simulate-v1-tracing]
+    paths:
+      - '**/*.go'
+      - '**/go.mod'
+      - '**/go.sum'
+      - build/**
+      - Makefile
+      - .golangci.yml
+      - .github/workflows/**
+      - tests/testdata/**
+      - tests/spec-tests/**
+      - '!**/*.md'
+  workflow_dispatch:
+    inputs:
+      full_validation:
+        description: Run full quality, multi-version tests, keeper and 386 validation
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOTOOLCHAIN: local
+  CGO_ENABLED: '1'
+  CC: gcc
+
+defaults:
+  run:
+    shell: bash
+    working-directory: .
+
+jobs:
+  simulate-targeted-linux:
+    if: github.repository == 'afhuuuu/go-ethereum' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == 'afhuuuu/go-ethereum'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+          cache: false
+      - name: Install C build tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config
+      - name: Verify toolchain
+        run: |
+          set -euo pipefail
+          command -v go gcc make
+          go version
+          gcc --version
+          go env GOROOT GOOS GOARCH CGO_ENABLED CC GOTOOLCHAIN
+      - name: List simulation tests and require new test families
+        run: |
+          set -euo pipefail
+          go test -mod=readonly -list '^TestSimulate' ./internal/ethapi ./eth | tee "$RUNNER_TEMP/simulate-tests.txt"
+          grep -q '^TestSimulateTrace' "$RUNNER_TEMP/simulate-tests.txt"
+          grep -q '^TestSimulateTraceStateSequence$' "$RUNNER_TEMP/simulate-tests.txt"
+          grep -q '^TestSimulateTraceMuxEquivalence$' "$RUNNER_TEMP/simulate-tests.txt"
+          grep -q '^TestSimulateTraceWithoutReceiptExport$' "$RUNNER_TEMP/simulate-tests.txt"
+          grep -q '^TestSimulateTraceSingleExecution$' "$RUNNER_TEMP/simulate-tests.txt"
+      - name: Simulation regression
+        run: |
+          set -euo pipefail
+          go test -mod=readonly -short -count=1 -timeout=10m -run '^TestSimulate' ./internal/ethapi ./eth
+      - name: Native tracer regression
+        run: |
+          set -euo pipefail
+          go test -mod=readonly -short -count=1 -timeout=10m ./eth/tracers ./eth/tracers/native
+      - name: Trace lifecycle and isolation race
+        run: |
+          set -euo pipefail
+          go test -mod=readonly -race -short -count=1 -timeout=10m -run '^TestSimulateTrace(FactoryContract|ResultContract|Lifecycle|Cancel|ObserverIsolation|SingleExecution|Concurrent)$' ./internal/ethapi ./eth
+      - name: Build geth
+        run: |
+          set -euo pipefail
+          go build -mod=readonly -o "$RUNNER_TEMP/geth" ./cmd/geth
+  simulate-targeted-windows:
+    if: github.repository == 'afhuuuu/go-ethereum' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == 'afhuuuu/go-ethereum'))
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: msys2 {0}
+        working-directory: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+          cache: false
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          path-type: inherit
+          install: mingw-w64-ucrt-x86_64-gcc make
+      - name: Verify toolchain
+        run: |
+          set -euo pipefail
+          printf "%s\n" "$PATH"
+          test "$MSYSTEM" = UCRT64
+          [[ "$(command -v gcc)" == /ucrt64/bin/gcc* ]]
+          command -v go gcc make
+          go version
+          gcc --version
+          go env GOROOT GOOS GOARCH CGO_ENABLED CC GOTOOLCHAIN
+      - name: List simulation tests and require new test families
+        run: |
+          set -euo pipefail
+          go test -mod=readonly -list '^TestSimulate' ./internal/ethapi ./eth | tee "$RUNNER_TEMP/simulate-tests.txt"
+          grep -q '^TestSimulateTrace' "$RUNNER_TEMP/simulate-tests.txt"
+          grep -q '^TestSimulateTraceStateSequence$' "$RUNNER_TEMP/simulate-tests.txt"
+          grep -q '^TestSimulateTraceMuxEquivalence$' "$RUNNER_TEMP/simulate-tests.txt"
+          grep -q '^TestSimulateTraceWithoutReceiptExport$' "$RUNNER_TEMP/simulate-tests.txt"
+          grep -q '^TestSimulateTraceSingleExecution$' "$RUNNER_TEMP/simulate-tests.txt"
+      - name: Simulation regression
+        run: |
+          set -euo pipefail
+          go test -mod=readonly -short -count=1 -timeout=10m -run '^TestSimulate' ./internal/ethapi ./eth
+      - name: Native tracer regression
+        run: |
+          set -euo pipefail
+          go test -mod=readonly -short -count=1 -timeout=10m ./eth/tracers ./eth/tracers/native
+      - name: Build geth
+        run: |
+          set -euo pipefail
+          go build -mod=readonly -o "$(cygpath -m "$RUNNER_TEMP")/geth.exe" ./cmd/geth
+  simulate-quality-linux:
+    if: github.repository == 'afhuuuu/go-ethereum' && github.event_name == 'workflow_dispatch' && inputs.full_validation == true
+    needs: [simulate-targeted-linux, simulate-targeted-windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+          cache: false
+      - name: Install C build tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config
+      - name: Verify toolchain
+        run: |
+          set -euo pipefail
+          command -v go gcc make
+          go version
+          gcc --version
+          go env GOROOT GOOS GOARCH CGO_ENABLED CC GOTOOLCHAIN
+      - uses: actions/cache@v4
+        with:
+          path: build/cache
+          key: ${{ runner.os }}-${{ runner.arch }}-go1.27.1-tools-${{ hashFiles('go.mod', 'go.sum', 'cmd/keeper/go.mod', 'cmd/keeper/go.sum', 'build/checksums.txt') }}
+      - name: Check task Go formatting
+        run: |
+          set -euo pipefail
+          files=(
+            internal/ethapi/api.go
+            internal/ethapi/simulate.go
+            internal/ethapi/simulate_tracing.go
+            internal/ethapi/simulate_tracing_test.go
+            eth/api_backend_simulate.go
+            eth/simulate_tracing_test.go
+          )
+          gofmt -l "${files[@]}" > "$RUNNER_TEMP/gofmt-files.txt"
+          cat "$RUNNER_TEMP/gofmt-files.txt"
+          test ! -s "$RUNNER_TEMP/gofmt-files.txt"
+          for i in "${!files[@]}"; do files[$i]="$GITHUB_WORKSPACE/${files[$i]}"; done
+          cd "$RUNNER_TEMP"
+          GOWORK=off go run golang.org/x/tools/cmd/goimports@v0.49.0 -d "${files[@]}" > "$RUNNER_TEMP/goimports.diff"
+          cat "$RUNNER_TEMP/goimports.diff"
+          test ! -s "$RUNNER_TEMP/goimports.diff"
+      - name: Lint with pinned project tools
+        run: |
+          set -euo pipefail
+          go run ./build/ci.go lint
+      - name: Check generated code and both modules
+        run: |
+          set -euo pipefail
+          go run ./build/ci.go check_generate
+      - name: Check dependency boundaries
+        run: |
+          set -euo pipefail
+          go run ./build/ci.go check_baddeps
+      - name: Show and reject generated or module changes
+        if: always()
+        run: |
+          set -euo pipefail
+          git diff --check
+          git diff --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+  simulate-full-linux:
+    if: github.repository == 'afhuuuu/go-ethereum' && github.event_name == 'workflow_dispatch' && inputs.full_validation == true
+    needs: [simulate-quality-linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        go: ['1.27.1', '1.26.x', '1.25.x']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: true
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: false
+      - name: Install C build tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config
+      - name: Verify toolchain
+        run: |
+          set -euo pipefail
+          command -v go gcc make
+          go version
+          gcc --version
+          go env GOROOT GOOS GOARCH CGO_ENABLED CC GOTOOLCHAIN
+      - name: Build all root commands
+        run: |
+          set -euo pipefail
+          make all
+      - name: Full tests in root and keeper modules
+        run: |
+          set -euo pipefail
+          go run ./build/ci.go test -p 2
+  simulate-keeper-linux:
+    if: github.repository == 'afhuuuu/go-ethereum' && github.event_name == 'workflow_dispatch' && inputs.full_validation == true
+    needs: [simulate-full-linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: true
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+          cache: false
+      - name: Install C build tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config
+      - name: Verify toolchain
+        run: |
+          set -euo pipefail
+          command -v go gcc make
+          go version
+          gcc --version
+          go env GOROOT GOOS GOARCH CGO_ENABLED CC GOTOOLCHAIN
+      - name: Build all five keeper targets
+        run: |
+          set -euo pipefail
+          go run ./build/ci.go keeper
+  simulate-386-linux:
+    if: github.repository == 'afhuuuu/go-ethereum' && github.event_name == 'workflow_dispatch' && inputs.full_validation == true
+    needs: [simulate-keeper-linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: true
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+          cache: false
+      - name: Install C build tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config
+      - name: Verify toolchain
+        run: |
+          set -euo pipefail
+          command -v go gcc make
+          go version
+          gcc --version
+          go env GOROOT GOOS GOARCH CGO_ENABLED CC GOTOOLCHAIN
+      - name: Install 386 compiler support
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends gcc-multilib
+      - name: Supplemental 386 short tests
+        run: |
+          set -euo pipefail
+          go run ./build/ci.go test -arch 386 -short -p 2
