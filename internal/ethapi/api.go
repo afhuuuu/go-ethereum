@@ -894,6 +894,10 @@ func (api *BlockChainAPI) SimulateV1(ctx context.Context, opts simOpts, blockNrO
 			return nil, &clientLimitExceededError{message: fmt.Sprintf("too many calls: %d > %d", totalCalls, maxSimulateTotalCalls)}
 		}
 	}
+	factory, err := simulationTraceFactory(api.b, opts.Tracer, opts.TracerConfig)
+	if err != nil {
+		return nil, err
+	}
 	if blockNrOrHash == nil {
 		n := rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
 		blockNrOrHash = &n
@@ -911,6 +915,7 @@ func (api *BlockChainAPI) SimulateV1(ctx context.Context, opts simOpts, blockNrO
 		traceTransfers: opts.TraceTransfers,
 		validate:       opts.Validation,
 		fullTx:         opts.ReturnFullTransactions,
+		traceFactory:   factory,
 	}
 	return sim.execute(ctx, opts.BlockStateCalls)
 }

@@ -17,6 +17,7 @@
 package ethapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -66,12 +67,13 @@ type simBlock struct {
 
 // simCallResult is the result of a simulated call.
 type simCallResult struct {
-	ReturnValue hexutil.Bytes  `json:"returnData"`
-	Logs        []*types.Log   `json:"logs"`
-	GasUsed     hexutil.Uint64 `json:"gasUsed"`
-	MaxUsedGas  hexutil.Uint64 `json:"maxUsedGas"`
-	Status      hexutil.Uint64 `json:"status"`
-	Error       *callError     `json:"error,omitempty"`
+	ReturnValue hexutil.Bytes   `json:"returnData"`
+	Logs        []*types.Log    `json:"logs"`
+	GasUsed     hexutil.Uint64  `json:"gasUsed"`
+	MaxUsedGas  hexutil.Uint64  `json:"maxUsedGas"`
+	Status      hexutil.Uint64  `json:"status"`
+	Error       *callError      `json:"error,omitempty"`
+	Trace       json.RawMessage `json:"trace,omitempty"`
 }
 
 func (r *simCallResult) MarshalJSON() ([]byte, error) {
@@ -117,6 +119,8 @@ type simOpts struct {
 	TraceTransfers         bool
 	Validation             bool
 	ReturnFullTransactions bool
+	Tracer                 *string
+	TracerConfig           json.RawMessage
 }
 
 // simChainHeadReader implements ChainHeaderReader which is needed as input for FinalizeAndAssemble.
@@ -204,6 +208,7 @@ type simulator struct {
 	traceTransfers bool
 	validate       bool
 	fullTx         bool
+	traceFactory   SimulationTracerFactory
 }
 
 // execute runs the simulation of a series of blocks.
@@ -309,8 +314,15 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 		// of the sender when translating the arguments into a transaction object.
 		senders = make(map[common.Hash]common.Address)
 	)
+	// Keep one hooks pointer in the EVM and HookedState. The immutable legacy
+	// hooks remain the only observers of pre/post block system execution.
+	legacyHooks := vmConfig.Tracer
+	if sim.traceFactory != nil {
+		liveHooks := *legacyHooks
+		vmConfig.Tracer = &liveHooks
+	}
 	tracingStateDB := vm.StateDB(sim.state)
-	if hooks := tracer.Hooks(); hooks != nil {
+	if hooks := vmConfig.Tracer; hooks != nil {
 		tracingStateDB = state.NewHookedState(sim.state, hooks)
 	}
 	evm := vm.NewEVM(blockContext, tracingStateDB, sim.chainConfig, *vmConfig)
@@ -345,29 +357,61 @@ func (sim *simulator) processBlock(ctx context.Context, block *simBlock, header,
 		// EoA check is always skipped, even in validation mode.
 		sim.state.SetTxContext(txHash, i, uint32(i+1))
 		msg := call.ToMessage(header.BaseFee, !sim.validate)
-		result, err := applyMessageWithEVM(ctx, evm, msg, timeout, gp)
+		result, trace, err := func() (*core.ExecutionResult, json.RawMessage, error) {
+			var session *simulationTraceSession
+			if sim.traceFactory != nil {
+				var err error
+				session, err = startSimulationTrace(ctx, sim.traceFactory, SimulationTraceContext{
+					BlockNumber: new(big.Int).Set(header.Number), TxIndex: i, TxHash: txHash,
+				}, legacyHooks, vmConfig.Tracer, evm, tx, call.from())
+				if err != nil {
+					return nil, nil, err
+				}
+			}
+			defer session.close()
+			result, err := applyMessageWithEVM(ctx, evm, msg, timeout, gp)
+			if err != nil {
+				session.end(nil, err)
+				return nil, nil, txValidationError(err)
+			}
+			// Finalise before OnTxEnd so native state diffs observe final state.
+			var root []byte
+			if sim.chainConfig.IsByzantium(blockContext.BlockNumber) {
+				blockAccessList.Merge(tracingStateDB.Finalise(evm.GetRules()))
+			} else {
+				root = sim.state.IntermediateRoot(evm.GetRules()).Bytes()
+			}
+			receipts[i] = core.MakeReceipt(evm, result, sim.state, blockContext.BlockNumber, common.Hash{}, blockContext.Time, tx, gp.CumulativeUsed(), root)
+			blobGasUsed += receipts[i].BlobGasUsed
+			if err := sim.budget.consume(result.UsedGas); err != nil {
+				session.end(receipts[i], err)
+				return nil, nil, err
+			}
+			session.end(receipts[i], nil)
+			if session == nil {
+				return result, nil, nil
+			}
+			trace, err := session.tracer.GetResult()
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
+			if err != nil {
+				return nil, nil, err
+			}
+			// Validate without rewriting the native output. Empty objects are valid,
+			// but missing/null or malformed results must not look like success.
+			if !json.Valid(trace) || bytes.Equal(bytes.TrimSpace(trace), []byte("null")) {
+				return nil, nil, errors.New("simulation tracer returned an invalid or null JSON result")
+			}
+			return result, trace, nil
+		}()
 		if err != nil {
-			txErr := txValidationError(err)
-			return nil, nil, nil, txErr
-		}
-		// Update the state with pending changes.
-		var root []byte
-		if sim.chainConfig.IsByzantium(blockContext.BlockNumber) {
-			blockAccessList.Merge(tracingStateDB.Finalise(evm.GetRules()))
-		} else {
-			root = sim.state.IntermediateRoot(evm.GetRules()).Bytes()
-		}
-		receipts[i] = core.MakeReceipt(evm, result, sim.state, blockContext.BlockNumber, common.Hash{}, blockContext.Time, tx, gp.CumulativeUsed(), root)
-		blobGasUsed += receipts[i].BlobGasUsed
-
-		// Make sure the gas cap is still enforced. It's only for
-		// internally protection.
-		if err := sim.budget.consume(result.UsedGas); err != nil {
 			return nil, nil, nil, err
 		}
 
 		logs := tracer.Logs()
 		callRes := simCallResult{ReturnValue: result.Return(), Logs: logs, GasUsed: hexutil.Uint64(result.UsedGas), MaxUsedGas: hexutil.Uint64(result.MaxUsedGas)}
+		callRes.Trace = trace
 		if result.Failed() {
 			callRes.Status = hexutil.Uint64(types.ReceiptStatusFailed)
 			if errors.Is(result.Err, vm.ErrExecutionReverted) {
